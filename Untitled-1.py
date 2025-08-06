@@ -418,6 +418,38 @@ class VFDDriver:
             logger.error(f"VFD poll error for {config.serial_port}: {e}")
             raise
 
+    @staticmethod
+    async def set_frequency(config: VFDConfig, frequency: float) -> None:
+        """Set VFD output frequency via Modbus RTU"""
+        try:
+            client = ModbusSerialClient(
+                port=config.serial_port,
+                baudrate=config.baudrate,
+                bytesize=8,
+                parity='N',
+                stopbits=1,
+                timeout=2
+            )
+
+            if not client.connect():
+                raise ConnectionError("Failed to connect to Modbus")
+
+            value = int(frequency * 100)
+            result = client.write_register(
+                address=0,
+                value=value,
+                slave=config.slave_id
+            )
+
+            client.close()
+
+            if result.isError():
+                raise ModbusException(f"Modbus error: {result}")
+
+        except Exception as e:
+            logger.error(f"VFD set_frequency error for {config.serial_port}: {e}")
+            raise
+
 # ============== Alert Engine ==============
 
 class AlertEngine:
@@ -793,27 +825,38 @@ class DeviceListWidget(QWidget):
         
     def init_ui(self):
         layout = QVBoxLayout()
-        
+
         # Device table
         self.table = QTableWidget()
         self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["ID", "Name", "Status", "Last Value"])
+        self.table.setHorizontalHeaderLabels(["ID", "Имя", "Статус", "Последнее значение"])
         self.table.horizontalHeader().setStretchLastSection(True)
-        
+
         layout.addWidget(self.table)
-        
+
+        if self.device_type == "VFD":
+            freq_layout = QHBoxLayout()
+            self.freq_input = QDoubleSpinBox()
+            self.freq_input.setRange(0, 1000)
+            self.freq_input.setSuffix(" Гц")
+            freq_layout.addWidget(self.freq_input)
+            set_btn = QPushButton("Установить частоту")
+            set_btn.clicked.connect(self.set_vfd_frequency)
+            freq_layout.addWidget(set_btn)
+            layout.addLayout(freq_layout)
+
         # Control buttons
         btn_layout = QHBoxLayout()
-        
-        add_btn = QPushButton("Add Device")
+
+        add_btn = QPushButton("Добавить устройство")
         add_btn.clicked.connect(self.add_device)
         btn_layout.addWidget(add_btn)
-        
-        edit_btn = QPushButton("Edit Device")
+
+        edit_btn = QPushButton("Редактировать")
         edit_btn.clicked.connect(self.edit_device)
         btn_layout.addWidget(edit_btn)
-        
-        delete_btn = QPushButton("Delete Device")
+
+        delete_btn = QPushButton("Удалить")
         delete_btn.clicked.connect(self.delete_device)
         btn_layout.addWidget(delete_btn)
         
@@ -821,7 +864,7 @@ class DeviceListWidget(QWidget):
         layout.addLayout(btn_layout)
         
         self.setLayout(layout)
-    
+
     def load_devices(self):
         """Load devices from database"""
         configs = self.db.load_configs(self.device_type)
@@ -830,7 +873,7 @@ class DeviceListWidget(QWidget):
         for i, config in enumerate(configs):
             self.table.setItem(i, 0, QTableWidgetItem(config["id"]))
             self.table.setItem(i, 1, QTableWidgetItem(config["name"]))
-            self.table.setItem(i, 2, QTableWidgetItem("Active" if config.get("enabled", True) else "Disabled"))
+            self.table.setItem(i, 2, QTableWidgetItem("Активен" if config.get("enabled", True) else "Отключен"))
             self.table.setItem(i, 3, QTableWidgetItem("-"))
     
     def add_device(self):
@@ -851,7 +894,7 @@ class DeviceListWidget(QWidget):
                 dialog = DeviceConfigDialog(self.device_type, config, self.db)
                 if dialog.exec():
                     self.load_devices()
-    
+                
     def delete_device(self):
         """Delete selected device"""
         row = self.table.currentRow()
@@ -859,14 +902,30 @@ class DeviceListWidget(QWidget):
             device_id = self.table.item(row, 0).text()
             
             reply = QMessageBox.question(
-                self, "Confirm Delete",
-                f"Delete device {device_id}?",
+                self, "Удалить устройство",
+                f"Удалить устройство {device_id}?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             
             if reply == QMessageBox.StandardButton.Yes:
                 self.db.delete_config(device_id)
                 self.load_devices()
+
+    def set_vfd_frequency(self):
+        """Set frequency for selected VFD"""
+        row = self.table.currentRow()
+        if row >= 0:
+            device_id = self.table.item(row, 0).text()
+            configs = self.db.load_configs(self.device_type)
+            cfg = next((c for c in configs if c["id"] == device_id), None)
+            if cfg:
+                config = VFDConfig(**cfg)
+                freq = self.freq_input.value()
+                try:
+                    asyncio.run(VFDDriver.set_frequency(config, freq))
+                    QMessageBox.information(self, "Успех", f"Частота {freq} Гц установлена")
+                except Exception as e:
+                    QMessageBox.critical(self, "Ошибка", f"Не удалось установить частоту: {e}")
     
     def update_data(self, device_id: str, data: dict):
         """Update device data in table"""
@@ -1106,18 +1165,18 @@ class SettingsWidget(QWidget):
         
         # Add tabs for each device type
         self.asic_widget = DeviceListWidget("ASIC", self.db)
-        self.tabs.addTab(self.asic_widget, "ASIC Miners")
-        
+        self.tabs.addTab(self.asic_widget, "ASIC-майнеры")
+
         self.mercury_widget = DeviceListWidget("Mercury", self.db)
-        self.tabs.addTab(self.mercury_widget, "Mercury Meters")
-        
+        self.tabs.addTab(self.mercury_widget, "Счетчики Mercury")
+
         self.vfd_widget = DeviceListWidget("VFD", self.db)
-        self.tabs.addTab(self.vfd_widget, "VFD Drives")
+        self.tabs.addTab(self.vfd_widget, "Частотники")
         
         layout.addWidget(self.tabs)
         
         # Export section
-        export_group = QGroupBox("Data Export")
+        export_group = QGroupBox("Экспорт данных")
         export_layout = QFormLayout()
         
         self.export_device = QComboBox()
@@ -1218,8 +1277,8 @@ class MainWindow(QMainWindow):
         self.polling_manager.start()
     
     def init_ui(self):
-        self.setWindowTitle("Industrial Equipment Monitor")
-        self.showFullScreen()
+        self.setWindowTitle("Мониторинг оборудования")
+        self.resize(1200, 800)
         
         # Main widget
         main_widget = QWidget()
@@ -1247,7 +1306,7 @@ class MainWindow(QMainWindow):
         """)
         
         # Add menu items
-        menu_items = ["Dashboard", "ASIC", "Mercury", "VFD", "Settings"]
+        menu_items = ["Панель", "Асики", "Меркурий", "ПЧ", "Настройки"]
         for item in menu_items:
             sidebar.addItem(item)
         
